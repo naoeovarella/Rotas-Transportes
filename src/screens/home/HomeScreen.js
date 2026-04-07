@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -8,57 +8,115 @@ import {
   SafeAreaView,
   ScrollView,
   Alert,
+  ActivityIndicator,
 } from 'react-native';
 import { useAuth } from '../../context/AuthContext';
+import { useTheme } from '../../context/ThemeContext';
+import { fetchRoutes } from '../../services/mapsService';
+import { addToHistory, getHistory, clearHistory } from '../../services/storageService';
+import RouteCard from '../../components/RouteCard';
 
-// TODO (70% restante): Substituir este placeholder pela integração real com a Google Maps Directions API.
-// Endpoint: https://maps.googleapis.com/maps/api/directions/json
-// Parâmetros necessários: origin, destination, mode=transit, key=GOOGLE_MAPS_API_KEY
-// A função fetchRoutes abaixo deve ser implementada em src/services/mapsService.js
-function RouteCardPlaceholder({ index }) {
-  const lines = [
-    { type: 'Metrô', line: 'Linha 2 - Verde', duration: '32 min', distance: '12,4 km', stops: 'Consolação → Anhangabaú' },
-    { type: 'Ônibus', line: '8012-10 Paulista', duration: '48 min', distance: '9,8 km', stops: 'Av. Paulista → Sé' },
-    { type: 'Trem', line: 'CPTM L7', duration: '55 min', distance: '18 km', stops: 'Luz → Brás' },
-  ];
-  const data = lines[index % lines.length];
+const FILTERS = [
+  { key: 'ALL',    label: 'Todos' },
+  { key: 'SUBWAY', label: 'Metrô' },
+  { key: 'BUS',    label: 'Ônibus' },
+  { key: 'TRAIN',  label: 'Trem' },
+];
 
-  return (
-    <View style={styles.routeCard}>
-      <View style={styles.routeCardHeader}>
-        <View style={[styles.badge, data.type === 'Metrô' ? styles.badgeMetro : data.type === 'Trem' ? styles.badgeTrain : styles.badgeBus]}>
-          <Text style={styles.badgeText}>{data.type === 'Metrô' ? 'M' : data.type === 'Trem' ? 'T' : 'Ô'}</Text>
-        </View>
-        <View style={styles.routeCardInfo}>
-          <Text style={styles.routeLineName}>{data.line}</Text>
-          <Text style={styles.routeStops}>{data.stops}</Text>
-        </View>
-        <View style={styles.routeDuration}>
-          <Text style={styles.routeDurationText}>{data.duration}</Text>
-          <Text style={styles.routeDistance}>{data.distance}</Text>
-        </View>
-      </View>
-      <View style={styles.placeholderBanner}>
-        <Text style={styles.placeholderBannerText}>Dados simulados — integração Maps pendente</Text>
-      </View>
-    </View>
-  );
-}
+const SORTS = [
+  { key: 'duration', label: '⏱ Tempo' },
+  { key: 'distance', label: '📍 Distância' },
+];
 
-export default function HomeScreen() {
+export default function HomeScreen({ navigation, route }) {
   const { user, logout } = useAuth();
-  const [origin, setOrigin] = useState('');
-  const [destination, setDestination] = useState('');
-  const [searched, setSearched] = useState(false);
+  const { colors }       = useTheme();
+  const styles           = getStyles(colors);
 
-  function handleSearch() {
+  const [origin, setOrigin]           = useState('');
+  const [destination, setDestination] = useState('');
+  const [routes, setRoutes]           = useState([]);
+  const [loading, setLoading]         = useState(false);
+  const [searched, setSearched]       = useState(false);
+  const [history, setHistory]         = useState([]);
+  const [currentTime, setCurrentTime] = useState(new Date());
+  const [filterType, setFilterType]   = useState('ALL');
+  const [sortBy, setSortBy]           = useState('duration');
+
+  // Relógio ao vivo
+  useEffect(() => {
+    const timer = setInterval(() => setCurrentTime(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Histórico
+  useEffect(() => {
+    getHistory().then(setHistory);
+  }, []);
+
+  // Preenche campos vindos de Rotas Populares
+  useEffect(() => {
+    if (route?.params?.prefillOrigin) {
+      setOrigin(route.params.prefillOrigin);
+      setDestination(route.params.prefillDestination);
+    }
+  }, [route?.params]);
+
+  const formattedTime = currentTime.toLocaleTimeString('pt-BR', {
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+  const formattedDate = currentTime.toLocaleDateString('pt-BR', {
+    weekday: 'short', day: '2-digit', month: 'short',
+  });
+
+  // Filtro + ordenação
+  const displayedRoutes = useMemo(() => {
+    let list = routes;
+    if (filterType !== 'ALL') {
+      list = routes.filter((r) => {
+        const t = r.steps.find((s) => s.type === 'transit');
+        return t?.vehicle === filterType;
+      });
+    }
+    return [...list].sort((a, b) =>
+      sortBy === 'duration'
+        ? a.durationValue - b.durationValue
+        : parseFloat(a.distance) - parseFloat(b.distance)
+    );
+  }, [routes, filterType, sortBy]);
+
+  async function handleSearch() {
     if (!origin.trim() || !destination.trim()) {
       Alert.alert('Atenção', 'Informe a origem e o destino.');
       return;
     }
-    // TODO (70% restante): Chamar mapsService.fetchRoutes(origin, destination)
-    // e exibir as rotas reais retornadas pela API.
-    setSearched(true);
+    setLoading(true);
+    setSearched(false);
+    setFilterType('ALL');
+    setSortBy('duration');
+    try {
+      const result = await fetchRoutes(origin.trim(), destination.trim());
+      setRoutes(result);
+      setSearched(true);
+      const updated = await addToHistory(origin.trim(), destination.trim());
+      setHistory(updated);
+    } catch (err) {
+      Alert.alert('Erro', err.message ?? 'Não foi possível buscar rotas.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function applyHistory(item) {
+    setOrigin(item.origin);
+    setDestination(item.destination);
+    setSearched(false);
+    setRoutes([]);
+  }
+
+  async function handleClearHistory() {
+    await clearHistory();
+    setHistory([]);
   }
 
   function handleLogout() {
@@ -70,24 +128,37 @@ export default function HomeScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea}>
+      {/* Header */}
       <View style={styles.header}>
-        <View>
+        <View style={{ flex: 1 }}>
           <Text style={styles.greeting}>Olá, {user?.name?.split(' ')[0]} 👋</Text>
           <Text style={styles.headerSubtitle}>Para onde você quer ir?</Text>
         </View>
-        <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
-          <Text style={styles.logoutText}>Sair</Text>
-        </TouchableOpacity>
+        <View style={styles.headerRight}>
+          <View style={styles.clockBox}>
+            <Text style={styles.clockTime}>{formattedTime}</Text>
+            <Text style={styles.clockDate}>{formattedDate}</Text>
+          </View>
+          <TouchableOpacity
+            style={styles.profileBtn}
+            onPress={() => navigation.navigate('Profile')}
+          >
+            <Text style={styles.profileInitial}>
+              {user?.name?.charAt(0).toUpperCase()}
+            </Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
+        {/* Campos de busca */}
         <View style={styles.searchCard}>
           <View style={styles.inputRow}>
             <View style={styles.dotGreen} />
             <TextInput
               style={styles.searchInput}
               placeholder="Localização atual"
-              placeholderTextColor="#9E9E9E"
+              placeholderTextColor={colors.textLight}
               value={origin}
               onChangeText={setOrigin}
             />
@@ -98,38 +169,123 @@ export default function HomeScreen() {
             <TextInput
               style={styles.searchInput}
               placeholder="Destino"
-              placeholderTextColor="#9E9E9E"
+              placeholderTextColor={colors.textLight}
               value={destination}
               onChangeText={setDestination}
             />
           </View>
         </View>
 
-        <TouchableOpacity style={styles.searchButton} onPress={handleSearch} activeOpacity={0.8}>
-          <Text style={styles.searchButtonText}>Buscar Rotas</Text>
-        </TouchableOpacity>
+        {/* Botões de ação */}
+        <View style={styles.actionRow}>
+          <TouchableOpacity
+            style={[styles.searchButton, loading && styles.searchButtonDisabled, { flex: 1 }]}
+            onPress={handleSearch}
+            activeOpacity={0.8}
+            disabled={loading}
+          >
+            {loading ? (
+              <ActivityIndicator color="#FFF" />
+            ) : (
+              <Text style={styles.searchButtonText}>Buscar Rotas</Text>
+            )}
+          </TouchableOpacity>
 
-        {searched && (
-          <View style={styles.resultsSection}>
-            <Text style={styles.resultsTitle}>Rotas disponíveis</Text>
-            <Text style={styles.resultsSubtitle}>
-              {origin} → {destination}
-            </Text>
+          <TouchableOpacity
+            style={styles.popularBtn}
+            onPress={() => navigation.navigate('PopularRoutes')}
+          >
+            <Text style={styles.popularBtnText}>⭐</Text>
+          </TouchableOpacity>
+        </View>
 
-            {/* TODO (70%): Mapear aqui as rotas reais retornadas pela API */}
-            {[0, 1, 2].map((i) => (
-              <RouteCardPlaceholder key={i} index={i} />
+        {/* Histórico */}
+        {history.length > 0 && !searched && !loading && (
+          <View style={styles.historySection}>
+            <View style={styles.historyHeader}>
+              <Text style={styles.historyTitle}>Buscas recentes</Text>
+              <TouchableOpacity onPress={handleClearHistory}>
+                <Text style={styles.historyClear}>Limpar</Text>
+              </TouchableOpacity>
+            </View>
+            {history.map((item, i) => (
+              <TouchableOpacity key={i} style={styles.historyItem} onPress={() => applyHistory(item)}>
+                <Text style={styles.historyIcon}>🕐</Text>
+                <Text style={styles.historyText} numberOfLines={1}>
+                  {item.origin} → {item.destination}
+                </Text>
+              </TouchableOpacity>
             ))}
           </View>
         )}
 
-        {!searched && (
+        {/* Filtros + Ordenação */}
+        {searched && (
+          <View style={styles.resultsSection}>
+            <Text style={styles.resultsTitle}>Rotas disponíveis</Text>
+            <Text style={styles.resultsSubtitle}>{origin} → {destination}</Text>
+
+            {/* Filtros */}
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filterRow}>
+              {FILTERS.map((f) => (
+                <TouchableOpacity
+                  key={f.key}
+                  style={[styles.filterChip, filterType === f.key && styles.filterChipActive]}
+                  onPress={() => setFilterType(f.key)}
+                >
+                  <Text style={[styles.filterChipText, filterType === f.key && styles.filterChipTextActive]}>
+                    {f.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+
+            {/* Ordenação */}
+            <View style={styles.sortRow}>
+              <Text style={styles.sortLabel}>Ordenar:</Text>
+              {SORTS.map((s) => (
+                <TouchableOpacity
+                  key={s.key}
+                  style={[styles.sortBtn, sortBy === s.key && styles.sortBtnActive]}
+                  onPress={() => setSortBy(s.key)}
+                >
+                  <Text style={[styles.sortBtnText, sortBy === s.key && styles.sortBtnTextActive]}>
+                    {s.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {displayedRoutes.length === 0 ? (
+              <View style={styles.noResults}>
+                <Text style={styles.noResultsText}>Nenhuma rota encontrada para este filtro.</Text>
+              </View>
+            ) : (
+              displayedRoutes.map((r) => (
+                <RouteCard
+                  key={r.id}
+                  route={r}
+                  onPress={() => navigation.navigate('RouteDetail', { route: r })}
+                />
+              ))
+            )}
+          </View>
+        )}
+
+        {/* Empty state */}
+        {!searched && !loading && history.length === 0 && (
           <View style={styles.emptyState}>
             <Text style={styles.emptyIcon}>🗺️</Text>
             <Text style={styles.emptyTitle}>Planeje sua rota</Text>
             <Text style={styles.emptyText}>
               Informe sua localização e destino para visualizar as opções de transporte público disponíveis.
             </Text>
+            <TouchableOpacity
+              style={styles.popularHint}
+              onPress={() => navigation.navigate('PopularRoutes')}
+            >
+              <Text style={styles.popularHintText}>⭐ Ver rotas populares</Text>
+            </TouchableOpacity>
           </View>
         )}
       </ScrollView>
@@ -137,100 +293,154 @@ export default function HomeScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: '#F5F7FB' },
-  header: {
-    backgroundColor: '#1565C0',
-    paddingHorizontal: 24,
-    paddingTop: 20,
-    paddingBottom: 24,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-  },
-  greeting: { fontSize: 20, fontWeight: '700', color: '#FFF' },
-  headerSubtitle: { fontSize: 13, color: '#90CAF9', marginTop: 2 },
-  logoutBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 6,
-    borderRadius: 20,
-    borderWidth: 1.5,
-    borderColor: '#90CAF9',
-  },
-  logoutText: { color: '#90CAF9', fontSize: 13, fontWeight: '600' },
-  body: { padding: 24, paddingBottom: 40 },
-  searchCard: {
-    backgroundColor: '#FFF',
-    borderRadius: 14,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 10,
-    elevation: 4,
-  },
-  inputRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 4 },
-  dotGreen: { width: 12, height: 12, borderRadius: 6, backgroundColor: '#43A047', marginRight: 12 },
-  dotRed: { width: 12, height: 12, borderRadius: 6, backgroundColor: '#E53935', marginRight: 12 },
-  searchInput: { flex: 1, paddingVertical: 12, fontSize: 15, color: '#212121' },
-  divider: { height: 1, backgroundColor: '#F0F0F0', marginLeft: 24 },
-  searchButton: {
-    backgroundColor: '#1565C0',
-    borderRadius: 12,
-    paddingVertical: 15,
-    alignItems: 'center',
-    marginTop: 16,
-    shadowColor: '#1565C0',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.3,
-    shadowRadius: 6,
-    elevation: 5,
-  },
-  searchButtonText: { color: '#FFF', fontSize: 16, fontWeight: '700' },
-  resultsSection: { marginTop: 28 },
-  resultsTitle: { fontSize: 18, fontWeight: '700', color: '#212121' },
-  resultsSubtitle: { fontSize: 13, color: '#757575', marginTop: 2, marginBottom: 16 },
-  routeCard: {
-    backgroundColor: '#FFF',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.06,
-    shadowRadius: 6,
-    elevation: 2,
-  },
-  routeCardHeader: { flexDirection: 'row', alignItems: 'center' },
-  badge: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
-  },
-  badgeMetro: { backgroundColor: '#1565C0' },
-  badgeBus: { backgroundColor: '#2E7D32' },
-  badgeTrain: { backgroundColor: '#6A1B9A' },
-  badgeText: { color: '#FFF', fontWeight: '700', fontSize: 14 },
-  routeCardInfo: { flex: 1 },
-  routeLineName: { fontSize: 14, fontWeight: '700', color: '#212121' },
-  routeStops: { fontSize: 12, color: '#757575', marginTop: 2 },
-  routeDuration: { alignItems: 'flex-end' },
-  routeDurationText: { fontSize: 15, fontWeight: '700', color: '#1565C0' },
-  routeDistance: { fontSize: 12, color: '#9E9E9E', marginTop: 2 },
-  placeholderBanner: {
-    backgroundColor: '#FFF9C4',
-    borderRadius: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    marginTop: 12,
-  },
-  placeholderBannerText: { fontSize: 11, color: '#F57F17', textAlign: 'center' },
-  emptyState: { alignItems: 'center', marginTop: 60 },
-  emptyIcon: { fontSize: 56, marginBottom: 16 },
-  emptyTitle: { fontSize: 18, fontWeight: '700', color: '#424242', marginBottom: 8 },
-  emptyText: { fontSize: 14, color: '#9E9E9E', textAlign: 'center', lineHeight: 20 },
-});
+function getStyles(colors) {
+  return StyleSheet.create({
+    safeArea: { flex: 1, backgroundColor: colors.background },
+    header: {
+      backgroundColor: colors.headerBg,
+      paddingHorizontal: 20,
+      paddingTop: 16,
+      paddingBottom: 20,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 12,
+    },
+    greeting: { fontSize: 18, fontWeight: '700', color: '#FFF' },
+    headerSubtitle: { fontSize: 12, color: colors.primaryLight, marginTop: 2 },
+    headerRight: { alignItems: 'flex-end', gap: 8 },
+    clockBox: { alignItems: 'flex-end' },
+    clockTime: { fontSize: 15, fontWeight: '700', color: '#FFF', letterSpacing: 1 },
+    clockDate: { fontSize: 11, color: colors.primaryLight, marginTop: 1, textTransform: 'capitalize' },
+    profileBtn: {
+      width: 36, height: 36, borderRadius: 18,
+      backgroundColor: '#FFF', justifyContent: 'center', alignItems: 'center',
+    },
+    profileInitial: { fontSize: 16, fontWeight: '700', color: colors.headerBg },
+
+    body: { padding: 20, paddingBottom: 40 },
+
+    searchCard: {
+      backgroundColor: colors.surface,
+      borderRadius: 14,
+      paddingHorizontal: 16,
+      paddingVertical: 8,
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 2 },
+      shadowOpacity: 0.08,
+      shadowRadius: 10,
+      elevation: 4,
+    },
+    inputRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 4 },
+    dotGreen: { width: 12, height: 12, borderRadius: 6, backgroundColor: colors.success, marginRight: 12 },
+    dotRed:   { width: 12, height: 12, borderRadius: 6, backgroundColor: colors.danger,  marginRight: 12 },
+    searchInput: { flex: 1, paddingVertical: 12, fontSize: 15, color: colors.text },
+    divider: { height: 1, backgroundColor: colors.divider, marginLeft: 24 },
+
+    actionRow: { flexDirection: 'row', gap: 10, marginTop: 14 },
+    searchButton: {
+      backgroundColor: colors.primary,
+      borderRadius: 12,
+      paddingVertical: 15,
+      alignItems: 'center',
+      shadowColor: colors.primary,
+      shadowOffset: { width: 0, height: 3 },
+      shadowOpacity: 0.3,
+      shadowRadius: 6,
+      elevation: 5,
+    },
+    searchButtonDisabled: { opacity: 0.7 },
+    searchButtonText: { color: '#FFF', fontSize: 16, fontWeight: '700' },
+    popularBtn: {
+      backgroundColor: colors.surface,
+      borderRadius: 12,
+      paddingHorizontal: 16,
+      justifyContent: 'center',
+      alignItems: 'center',
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 1 },
+      shadowOpacity: 0.06,
+      shadowRadius: 4,
+      elevation: 2,
+    },
+    popularBtnText: { fontSize: 20 },
+
+    // Histórico
+    historySection: { marginTop: 24 },
+    historyHeader: {
+      flexDirection: 'row', justifyContent: 'space-between',
+      alignItems: 'center', marginBottom: 10,
+    },
+    historyTitle: { fontSize: 14, fontWeight: '700', color: colors.textSecondary },
+    historyClear: { fontSize: 12, color: colors.danger },
+    historyItem: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: colors.surface,
+      borderRadius: 10,
+      paddingHorizontal: 14,
+      paddingVertical: 12,
+      marginBottom: 6,
+      gap: 10,
+      elevation: 1,
+    },
+    historyIcon: { fontSize: 16 },
+    historyText: { flex: 1, fontSize: 13, color: colors.text },
+
+    // Resultados
+    resultsSection: { marginTop: 24 },
+    resultsTitle: { fontSize: 18, fontWeight: '700', color: colors.text },
+    resultsSubtitle: { fontSize: 13, color: colors.textMuted, marginTop: 2, marginBottom: 12 },
+
+    // Filtros
+    filterRow: { marginBottom: 10 },
+    filterChip: {
+      borderRadius: 20,
+      paddingHorizontal: 14,
+      paddingVertical: 7,
+      marginRight: 8,
+      backgroundColor: colors.surface,
+      borderWidth: 1.5,
+      borderColor: colors.border,
+    },
+    filterChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+    filterChipText: { fontSize: 13, fontWeight: '600', color: colors.textMuted },
+    filterChipTextActive: { color: '#FFF' },
+
+    // Ordenação
+    sortRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      marginBottom: 16,
+    },
+    sortLabel: { fontSize: 13, color: colors.textMuted },
+    sortBtn: {
+      paddingHorizontal: 12,
+      paddingVertical: 6,
+      borderRadius: 8,
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderColor: colors.border,
+    },
+    sortBtnActive: { backgroundColor: colors.primaryBg, borderColor: colors.primary },
+    sortBtnText: { fontSize: 12, color: colors.textMuted, fontWeight: '600' },
+    sortBtnTextActive: { color: colors.primary },
+
+    noResults: { alignItems: 'center', paddingVertical: 24 },
+    noResultsText: { fontSize: 14, color: colors.textMuted },
+
+    // Empty
+    emptyState: { alignItems: 'center', marginTop: 60 },
+    emptyIcon:  { fontSize: 56, marginBottom: 16 },
+    emptyTitle: { fontSize: 18, fontWeight: '700', color: colors.text, marginBottom: 8 },
+    emptyText:  { fontSize: 14, color: colors.textMuted, textAlign: 'center', lineHeight: 20 },
+    popularHint: {
+      marginTop: 20,
+      backgroundColor: colors.primaryBg,
+      borderRadius: 12,
+      paddingHorizontal: 20,
+      paddingVertical: 12,
+    },
+    popularHintText: { color: colors.primary, fontWeight: '700', fontSize: 14 },
+  });
+}
